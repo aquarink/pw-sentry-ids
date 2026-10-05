@@ -8,14 +8,14 @@
 ---
 
 ## Abstract
-Distributed Massively Multiplayer Online Role-Playing Games (MMORPGs) rely on proprietary, stateful binary Remote Procedure Call (RPC) protocols multiplexed across thousands of concurrent clients. In legacy enterprise MMORPG engines (e.g., Wanmei / Perfect World architecture), client connections terminate at demultiplexing gateway daemons (`glinkd`), which serialize, compress, and forward game logic packets to core simulation engines (`gs`) over high-throughput persistent IPC/TCP channels. This paper investigates an undocumented, catastrophic failure mode: **Cascading Session Eviction via Protocol State-Size Desynchronization**. Under concurrent burst queries (e.g., in-game auction inventory serialization), asymmetric socket buffer starvation causes local socket stalls, prompting the gateway to drop its engine-provider session. Upon immediate reconnection, the gateway flushes accumulated in-flight payload queues (e.g., packet type 75, $10{,}510$ bytes) into the gameserver's re-initialization handshake phase, which enforces a strict invariant limit of $\le 60$ bytes. The resulting protocol policy rejection triggers an infinite crash-and-reconnect eviction loop, severing thousands of active player sessions. 
+Distributed Massively Multiplayer Online Role-Playing Games (MMORPGs) rely on proprietary, stateful binary Remote Procedure Call (RPC) protocols multiplexed across thousands of concurrent clients. In legacy enterprise MMORPG engines (e.g., Wanmei / Perfect World architecture), client connections terminate at demultiplexing gateway daemons (`glinkd`), which serialize, compress, and forward game logic packets to core simulation engines (`gs`) over high-throughput persistent IPC/TCP channels. This paper investigates an undocumented, catastrophic failure mode: **Cascading Session Eviction via Protocol State-Size Desynchronization**. Under concurrent burst queries (e.g., in-game auction inventory serialization), asymmetric socket buffer starvation causes local socket stalls, prompting the gateway to drop its engine-provider session. Upon immediate reconnection, the gateway flushes accumulated in-flight payload queues (e.g., packet type 75, 10,510 bytes) into the gameserver's re-initialization handshake phase, which enforces a strict invariant limit of <= 60 bytes. The resulting protocol policy rejection triggers an infinite crash-and-reconnect eviction loop, severing thousands of active player sessions. 
 
 To solve this vulnerability, we synthesize three theoretical foundations:
 1. **Extended Finite State Machine (EFSM)** verification to mathematically formalize protocol invariance and detect illegal transitions (derived from automated protocol attack synthesis);
 2. **Asymmetric Socket Backpressure Equations** modeling kernel send/receive queues to resolve bufferbloat and starvation;
 3. **Multiparty Session Types (MPST) with Affine Failure Semantics** (derived from Rust MPST theory) to transform non-affine fatal crashes into isolated sub-session quarantining.
 
-We implement **PW-Sentry**, a lightweight, four-tier hybrid intrusion detection and mitigation engine operating across the L4 kernel socket layer, L7 binary state machine, and behavioral sliding-window EWMA rate scorer. Evaluated on a production 8-core, 16 GB server managing hundreds of live players, PW-Sentry reduced TCP reset storms by **99.999%** (from $49{,}462{,}030$ to $437$ packets), decreased peak CPU load from $16.85$ to $1.18$ (**92.99%** reduction), eliminated session drop rates (**100% availability**), and achieved near-perfect classification ($\text{ROC-AUC} = 0.9986$, $\text{F1} = 0.9975$) with an ultra-low footprint of $< 35$ MB RAM and $< 0.2\%$ CPU. Complete numerical matrices, mathematical proofs, and replication scripts are provided.
+We implement **PW-Sentry**, a lightweight, four-tier hybrid intrusion detection and mitigation engine operating across the L4 kernel socket layer, L7 binary state machine, and behavioral sliding-window EWMA rate scorer. Evaluated on a production 8-core, 16 GB server managing hundreds of live players, PW-Sentry reduced TCP reset storms by **99.999%** (from 49,462,030 to 437 packets), decreased peak CPU load from 16.85 to 1.18 (**92.99%** reduction), eliminated session drop rates (**100% availability**), and achieved near-perfect classification (ROC-AUC = 0.9986, F1 = 0.9975) with an ultra-low footprint of < 35 MB RAM and < 0.2% CPU. Complete numerical matrices, mathematical proofs, and replication scripts are provided.
 
 ---
 
@@ -69,21 +69,25 @@ flowchart TD
 ```
 
 ### 1.2 The Vulnerability: Cascading Session Eviction Loop
-Legacy binary engines operate under the assumption that internal inter-daemon communication over loopback (`127.0.0.1`) or local LAN is lossless, zero-latency, and perpetually reliable. In production environments, this assumption breaks under high concurrency ($N \ge 50$ players):
-1. **Asymmetric Backpressure:** Individual clients trigger data-intensive RPC requests, such as `sysauctiongetitem` or `dbgetmaillist`. The gateway attempts to deliver these multi-kilobyte serialized records across an under-provisioned internal socket buffer ($B_{\text{sock}} = 64\text{ KB}$, Nagle's algorithm enabled with `tcp_nodelay=0`, socket backlog 10).
+Legacy binary engines operate under the assumption that internal inter-daemon communication over loopback (`127.0.0.1`) or local LAN is lossless, zero-latency, and perpetually reliable. In production environments, this assumption breaks under high concurrency (N >= 50 players):
+1. **Asymmetric Backpressure:** Individual clients trigger data-intensive RPC requests, such as `sysauctiongetitem` or `dbgetmaillist`. The gateway attempts to deliver these multi-kilobyte serialized records across an under-provisioned internal socket buffer (capacity 64 KB, Nagle's algorithm enabled with `tcp_nodelay=0`, socket backlog 10).
 2. **Buffer Starvation and Provider Drop:** When the socket buffer fills faster than the gameserver can drain it, socket backpressure causes the gateway socket write call to block or time out. The gateway concludes that the gameserver has hung and invokes its global disconnect routine:
-   $$\text{Log: } \texttt{err : glinkd::disconnect from gameserver 1, drop all players}$$
+   ```text
+   err : glinkd::disconnect from gameserver 1, drop all players
+   ```
    Instantly, all 50+ connected players are forcibly evicted from the game world.
-3. **Protocol State-Size Desynchronization on Reconnection:** The gateway immediately initiates an automated reconnect to the gameserver provider port. However, because the gateway's internal dispatch queue was not cleared, it flushes accumulated in-flight payload buffers into the newly opened TCP session. Specifically, it transmits a packet of type 75 (`C2SGamedataSend`) containing $10{,}510$ bytes of pending player action data.
-4. **State Machine Policy Rejection:** At the gameserver, the new TCP session has just entered `STATE_HANDSHAKE` ($s_{\text{handshake}}$). During this initialization phase, the engine requires session credential validation and strictly enforces a maximum packet size constraint of $S_{\text{accept}} = 60\text{ bytes}$:
-   $$\text{Log: } \texttt{err : Protocol state or size policy error. sid=1857020, type=75, size=10510, acceptsize=60}$$
+3. **Protocol State-Size Desynchronization on Reconnection:** The gateway immediately initiates an automated reconnect to the gameserver provider port. However, because the gateway's internal dispatch queue was not cleared, it flushes accumulated in-flight payload buffers into the newly opened TCP session. Specifically, it transmits a packet of type 75 (`C2SGamedataSend`) containing 10,510 bytes of pending player action data.
+4. **State Machine Policy Rejection:** At the gameserver, the new TCP session has just entered handshake state (`STATE_HANDSHAKE`). During this initialization phase, the engine requires session credential validation and strictly enforces a maximum packet size constraint of 60 bytes:
+   ```text
+   err : Protocol state or size policy error. sid=1857020, type=75, size=10510, acceptsize=60
+   ```
    The gameserver immediately executes `OnAbortSession(0)`, severing the TCP session.
-5. **Infinite Eviction Storm:** The gateway reconnects again, flushes the same pending queue, violates the handshake policy again, and generates a continuous stream of TCP `RST` packets ($> 49\text{ million}$ packets/hour), driving CPU utilization to $88.4\%$ and maintaining server availability at $0\%$.
+5. **Infinite Eviction Storm:** The gateway reconnects again, flushes the same pending queue, violates the handshake policy again, and generates a continuous stream of TCP `RST` packets (> 49 million packets/hour), driving CPU utilization to 88.4% and maintaining server availability at 0%.
 
 ### 1.3 Research Objectives & Research Questions
 This paper formalizes this vulnerability, evaluates why traditional intrusion detection systems (IDS) fail, and designs a multi-tier runtime defense. We address three research questions:
 - **RQ1 (Formalization):** *How can cascading session eviction in stateful binary protocols be mathematically modeled using Extended Finite State Machines (EFSM) and differential socket queue dynamics?*
-- **RQ2 (Telemetry & Detection):** *How can multi-layer telemetry (Kernel L4 metrics, L7 EFSM invariant checking, and sliding-window EWMA behavioral scoring) be coupled to detect both low-rate semantic exploits and high-rate buffer starvation with $< 1\%$ CPU overhead?*
+- **RQ2 (Telemetry & Detection):** *How can multi-layer telemetry (Kernel L4 metrics, L7 EFSM invariant checking, and sliding-window EWMA behavioral scoring) be coupled to detect both low-rate semantic exploits and high-rate buffer starvation with < 1% CPU overhead?*
 - **RQ3 (Resilience & Affine Isolation):** *How can the theoretical framework of Multiparty Session Types (MPST) with affine failure semantics be applied to isolate malicious sub-sessions and prevent catastrophic global cascading collapses?*
 
 ---
@@ -100,10 +104,10 @@ flowchart LR
 ```
 
 ### 2.1 Protocol State Machine Vulnerabilities & Automated Attack Synthesis
-Prior literature on protocol security focuses heavily on extracting state machines from text specifications (e.g., RFCs) to synthesize input sequences that trigger illegal state transitions. While foundational, existing work assumes standard textual protocols (e.g., BGP, TCP, TLS) and misses proprietary, variable-length binary RPC frameworks where state transitions are coupled with dynamic payload-length guards ($S_{\text{pkt}} \le S_{\text{accept}}$). In this paper, we extend EFSM theory to proprietary binary protocols, formalizing how state-size coupling can be synthesized into an application-layer denial-of-service attack.
+Prior literature on protocol security focuses heavily on extracting state machines from text specifications (e.g., RFCs) to synthesize input sequences that trigger illegal state transitions. While foundational, existing work assumes standard textual protocols (e.g., BGP, TCP, TLS) and misses proprietary, variable-length binary RPC frameworks where state transitions are coupled with dynamic payload-length guards (length <= S_accept). In this paper, we extend EFSM theory to proprietary binary protocols, formalizing how state-size coupling can be synthesized into an application-layer denial-of-service attack.
 
 ### 2.2 Flow-Based Network Anomaly Detection vs. L7 Semantic Exploits
-Traditional network anomaly detection systems (NADS) rely on L3/L4 statistical flow features (packet rate, byte entropy, SYN/ACK ratios). However, as highlighted in network traffic anomaly literature, flow-based IDS suffers from a critical semantic blindspot: an exploit packet such as `sysauctiongetitem` or packet type 75 is syntactically valid and arrives over an established internal TCP stream. Volumetrically, a single $10{,}510$-byte packet is undetectable amidst thousands of regular packets. PW-Sentry addresses this gap by unifying kernel socket state telemetry with L7 invariant checking.
+Traditional network anomaly detection systems (NADS) rely on L3/L4 statistical flow features (packet rate, byte entropy, SYN/ACK ratios). However, as highlighted in network traffic anomaly literature, flow-based IDS suffers from a critical semantic blindspot: an exploit packet such as `sysauctiongetitem` or packet type 75 is syntactically valid and arrives over an established internal TCP stream. Volumetrically, a single 10,510-byte packet is undetectable amidst thousands of regular packets. PW-Sentry addresses this gap by unifying kernel socket state telemetry with L7 invariant checking.
 
 ### 2.3 Multiparty Session Types (MPST) and Affine Failure Semantics
 In multiparty distributed interactions, communication protocols are formalized as global session types projected onto local endpoints to ensure communication safety, deadlock freedom, and protocol conformance. Recent breakthroughs in affine session typing demonstrate that distributed systems can recover gracefully from localized crashes if failure transitions are governed by affine semantics (where session resources are used *at most once* and can be terminated without poisoning the shared channel). In legacy MMORPG C++ architectures, gateway-to-server channels lack affine failure semantics: an unhandled exception or size-policy violation on a single player sub-session terminates the entire shared provider pipe. PW-Sentry acts as a runtime affine session monitor, enforcing sub-session isolation.
@@ -115,38 +119,83 @@ In multiparty distributed interactions, communication protocols are formalized a
 ### 3.1 Formal Extended Finite State Machine (EFSM) Model
 
 We formalize the gateway-to-gameserver session lifecycle as an Extended Finite State Machine:
-$$\mathcal{M} = \langle S, \Sigma, \mathcal{V}, T, s_0, \mathcal{G}, \mathcal{A} \rangle$$
-where:
-- $S = \{s_{\text{init}}, s_{\text{handshake}}, s_{\text{authenticated}}, s_{\text{world}}, s_{\text{quarantined}}, s_{\text{terminated}}\}$ represents the set of operational session states;
-- $\Sigma = \{p_{\text{syn}}, p_{\text{ack}}, p_{\text{ident}}, p_{\text{auth}}, p_{\text{rpc}}, p_{\text{raw}}, p_{\text{rst}}\}$ denotes the input alphabet of binary packet tokens;
-- $\mathcal{V} = \{L_{\text{pkt}}, S_{\text{accept}}, \text{UID}, \text{RoleID}, Q_{\text{backlog}}\}$ represents the evaluation variable set;
-- $s_0 = s_{\text{init}}$ is the initial entry state;
-- $\mathcal{G}$ is the set of guard predicates mapping $(\Sigma \times \mathcal{V}) \to \{\text{True}, \text{False}\}$;
-- $\mathcal{A}$ is the set of transition actions executing side-effects on the system;
-- $T: S \times \Sigma \times \mathcal{G} \to S \times \mathcal{A}$ is the state transition function.
+
+$$
+\mathcal{M} = \langle S, \, \Sigma, \, \mathcal{V}, \, T, \, s_0, \, \mathcal{G}, \, \mathcal{A} \rangle
+$$
+
+where each formal component is defined as follows:
+
+- **Operational State Space ($S$):**
+
+  $$
+  S = \left\{ s_{\text{init}}, \, s_{\text{handshake}}, \, s_{\text{authenticated}}, \, s_{\text{world}}, \, s_{\text{quarantined}}, \, s_{\text{terminated}} \right\}
+  $$
+
+- **Input Token Alphabet ($\Sigma$):**
+
+  $$
+  \Sigma = \left\{ p_{\text{syn}}, \, p_{\text{ack}}, \, p_{\text{ident}}, \, p_{\text{auth}}, \, p_{\text{rpc}}, \, p_{\text{raw}}, \, p_{\text{rst}} \right\}
+  $$
+
+- **Evaluation State Variables ($\mathcal{V}$):**
+
+  $$
+  \mathcal{V} = \left\{ L_{\text{pkt}}, \, S_{\text{accept}}, \, \text{UID}, \, \text{RoleID}, \, Q_{\text{backlog}} \right\}
+  $$
+
+- **Initial Entry State:** $s_0 = s_{\text{init}}$
+- **Guard Predicates ($\mathcal{G}$):** Mapping $(\Sigma \times \mathcal{V}) \to \{\text{True}, \text{False}\}$
+- **Transition Actions ($\mathcal{A}$):** Set of kernel and application-level side-effects
+- **State Transition Function ($T$):** Mapping $S \times \Sigma \times \mathcal{G} \to S \times \mathcal{A}$
 
 #### Definition 1 (Handshake Size Invariance Guard)
 Let $p \in \Sigma$ be an incoming packet delivered to session $\sigma$ at state $s(\sigma)$. The handshake size invariant guard $\mathcal{G}_{\text{hs}}(p)$ is defined as:
-$$\mathcal{G}_{\text{hs}}(p) \triangleq \begin{cases} 
+
+$$
+\mathcal{G}_{\text{hs}}(p) \triangleq \begin{cases} 
 \text{True}, & \text{if } \text{len}(p) \le S_{\text{accept}} \quad (\text{where } S_{\text{accept}} = 60\text{ bytes}) \\ 
 \text{False}, & \text{otherwise} 
-\end{cases}$$
+\end{cases}
+$$
 
 #### Theorem 1 (Cascading Rejection Theorem)
-*Let a shared gateway session $\sigma_{\text{gw}}$ contain $k$ multiplexed player streams $\{u_1, u_2, \dots, u_k\}$. If an in-flight packet $p_x$ belonging to user $u_x$ with $\text{len}(p_x) = 10{,}510\text{ bytes}$ is presented to the engine while $s(\sigma_{\text{gw}}) = s_{\text{handshake}}$, the state machine transitions deterministically to $s_{\text{terminated}}$, triggering an unmitigated global session eviction $\mathcal{A}_{\text{evict}}$:*
-$$T(s_{\text{handshake}}, p_x, \neg \mathcal{G}_{\text{hs}}(p_x)) \longrightarrow (s_{\text{terminated}}, \mathcal{A}_{\text{evict}})$$
-*such that $\forall i \in \{1, \dots, k\}$, player $u_i$ is disconnected.*
+*Let a shared gateway session $\sigma_{\text{gw}}$ contain $k$ multiplexed player streams $\{u_1, u_2, \dots, u_k\}$. If an in-flight packet $p_x$ belonging to user $u_x$ with $\text{len}(p_x) = 10{,}510\text{ bytes}$ is presented to the engine while in state $s_{\text{handshake}}$, the state machine transitions deterministically to $s_{\text{terminated}}$, triggering an unmitigated global session eviction $\mathcal{A}_{\text{evict}}$:*
+
+$$
+T(s_{\text{handshake}}, \, p_x, \, \neg \mathcal{G}_{\text{hs}}(p_x)) \longrightarrow (s_{\text{terminated}}, \, \mathcal{A}_{\text{evict}})
+$$
+
+*such that for all $i \in \{1, \dots, k\}$, player $u_i$ is disconnected.*
 
 *Proof.*  
 1. When $\sigma_{\text{gw}}$ disconnects due to socket backpressure, its state resets to $s_0 = s_{\text{init}}$.
-2. Upon TCP 3-way handshake completion, $T(s_{\text{init}}, p_{\text{ack}}, \text{True}) \to (s_{\text{handshake}}, \mathcal{A}_{\text{alloc}})$, setting $S_{\text{accept}} = 60\text{ bytes}$.
+2. Upon TCP 3-way handshake completion:
+
+   $$
+   T(s_{\text{init}}, \, p_{\text{ack}}, \, \text{True}) \longrightarrow (s_{\text{handshake}}, \, \mathcal{A}_{\text{alloc}})
+   $$
+
+   setting $S_{\text{accept}} = 60\text{ bytes}$.
 3. In legacy `glinkd`, pending packet queues are not segregated by state maturity. The head-of-line packet in the output queue is $p_x$ (`type=75`, $\text{len}(p_x) = 10{,}510$).
-4. The gameserver evaluates $\mathcal{G}_{\text{hs}}(p_x)$:
-   $$\text{len}(p_x) = 10{,}510 > 60 = S_{\text{accept}} \implies \mathcal{G}_{\text{hs}}(p_x) = \text{False}$$
+4. The gameserver evaluates the guard $\mathcal{G}_{\text{hs}}(p_x)$:
+
+   $$
+   \text{len}(p_x) = 10{,}510 > 60 = S_{\text{accept}} \implies \mathcal{G}_{\text{hs}}(p_x) = \text{False}
+   $$
+
 5. Under legacy engine error handling, the false guard triggers the size policy rejection branch:
-   $$\text{Action: } \mathcal{A}_{\text{abort}} = \{\text{Log}("Protocol state or size policy error"), \text{close}(sid), \text{SendRST}()\}$$
+
+   $$
+   \mathcal{A}_{\text{abort}} = \left\{ \text{close}(sid), \, \text{SendRST}() \right\}
+   $$
+
 6. The gateway receives the abrupt session closure and executes:
-   $$\mathcal{A}_{\text{evict}} = \bigcup_{i=1}^k \{\text{EvictPlayer}(u_i), \text{ClearInWorldState}(u_i)\}$$
+
+   $$
+   \mathcal{A}_{\text{evict}} = \bigcup_{i=1}^k \left\{ \text{EvictPlayer}(u_i), \, \text{ClearInWorldState}(u_i) \right\}
+   $$
+
 7. The cycle repeats ad infinitum because $p_x$ remains at the head of the gateway's unacknowledged retransmission queue. $\blacksquare$
 
 ---
@@ -154,15 +203,27 @@ $$T(s_{\text{handshake}}, p_x, \neg \mathcal{G}_{\text{hs}}(p_x)) \longrightarro
 ### 3.2 Asymmetric Socket Backpressure & Queue Saturation Dynamics
 
 We model the internal socket communication queue between Gateway and Gameserver as a continuous-time fluid queue:
-$$\frac{dQ_{\text{send}}(t)}{dt} = \lambda_{\text{in}}(t) - \mu_{\text{drain}}(t)$$
+
+$$
+\frac{dQ_{\text{send}}(t)}{dt} = \lambda_{\text{in}}(t) - \mu_{\text{drain}}(t)
+$$
+
 where:
 - $Q_{\text{send}}(t) \in [0, B_{\text{sock}}]$ is the instantaneous occupancy of the socket send buffer (in bytes);
 - $B_{\text{sock}}$ is the kernel socket buffer capacity (`SO_SNDBUF`);
 - $\lambda_{\text{in}}(t)$ is the aggregate packet arrival rate from $N$ connected clients:
-  $$\lambda_{\text{in}}(t) = \sum_{i=1}^N r_i(t) \cdot \overline{S}_i$$
+
+  $$
+  \lambda_{\text{in}}(t) = \sum_{i=1}^N r_i(t) \cdot \overline{S}_i
+  $$
+
   with $r_i(t)$ being the RPC invocation rate of player $i$ and $\overline{S}_i$ the serialized payload size;
 - $\mu_{\text{drain}}(t)$ is the effective socket draining rate:
-  $$\mu_{\text{drain}}(t) = \frac{\text{MSS}}{\text{RTT} + t_{\text{proc}}} \cdot \mathbb{I}_{(\text{Window} > 0)} \cdot (1 - \delta_{\text{Nagle}})$$
+
+  $$
+  \mu_{\text{drain}}(t) = \frac{\text{MSS}}{\text{RTT} + t_{\text{proc}}} \cdot \mathbb{I}_{(\text{Window} > 0)} \cdot (1 - \delta_{\text{Nagle}})
+  $$
+
   where $\delta_{\text{Nagle}} \in [0, 1)$ represents the transmission penalty introduced by Nagle's algorithm waiting for pending ACKs on small packets.
 
 ```mermaid
@@ -177,19 +238,36 @@ graph LR
 #### Derivation of Buffer Stall Boundary ($\tau_{\text{stall}}$)
 Assume at time $t = 0$, an initial buffer occupancy $Q(0) = Q_0$. A sudden burst of complex RPC queries (e.g., $m$ concurrent players requesting auction item inventories) injects a burst rate $\lambda_{\text{burst}} \gg \mu_{\text{drain}}$.  
 Integrating the differential equation over the burst interval $[0, \tau]$:
-$$Q(\tau) = Q_0 + \int_0^\tau (\lambda_{\text{burst}} - \mu) \, dt = Q_0 + (\lambda_{\text{burst}} - \mu) \tau$$
+
+$$
+Q(\tau) = Q_0 + \int_0^\tau (\lambda_{\text{burst}} - \mu) \, dt = Q_0 + (\lambda_{\text{burst}} - \mu) \tau
+$$
 
 Buffer saturation occurs precisely when $Q(\tau) = B_{\text{sock}}$. Solving for the stall time threshold $\tau_{\text{stall}}$:
-$$\tau_{\text{stall}} = \frac{B_{\text{sock}} - Q_0}{\lambda_{\text{burst}} - \mu}$$
+
+$$
+\tau_{\text{stall}} = \frac{B_{\text{sock}} - Q_0}{\lambda_{\text{burst}} - \mu}
+$$
 
 #### Proposition 1 (Buffer Sizing and Nagle Elimination)
-*Under default server parameters ($B_{\text{sock}} = 64\text{ KB} = 65{,}536\text{ bytes}$, $Q_0 = 32\text{ KB}$, $\mu = 40\text{ KB/s}$ due to Nagle delay $\delta_{\text{Nagle}} = 0.6$, and an auction query burst $\lambda_{\text{burst}} = 10$ queries $\times 10{,}510\text{ bytes} \approx 105{,}100\text{ bytes/s}$):*
-$$\tau_{\text{stall}}^{\text{default}} = \frac{65{,}536 - 32{,}768}{105{,}100 - 40{,}960} = \frac{32{,}768}{64{,}140} \approx 0.510\text{ seconds} \quad (510\text{ ms})$$
+*Under default server parameters ($B_{\text{sock}} = 64\text{ KB} = 65{,}536\text{ bytes}$, $Q_0 = 32\text{ KB}$, $\mu = 40\text{ KB/s}$ due to Nagle delay $\delta_{\text{Nagle}} = 0.6$, and an auction query burst $\lambda_{\text{burst}} = 10 \times 10{,}510\text{ bytes} \approx 105{,}100\text{ bytes/s}$):*
+
+$$
+\tau_{\text{stall}}^{\text{default}} = \frac{65{,}536 - 32{,}768}{105{,}100 - 40{,}960} = \frac{32{,}768}{64{,}140} \approx 0.510\text{ s} \quad (510\text{ ms})
+$$
+
 *Because the gateway's IPC timeout is configured at $500\text{ ms}$, the buffer saturates and trips the disconnect watchdog.*
 
 *In contrast, when upgraded to $B_{\text{sock}} = 256\text{ KB} = 262{,}144\text{ bytes}$ with `TCP_NODELAY=1` ($\delta_{\text{Nagle}} = 0$, boosting $\mu \ge 180\text{ KB/s}$ over loopback):*
-$$\lambda_{\text{burst}} - \mu = 105{,}100 - 184{,}320 \le 0$$
-$$\frac{dQ_{\text{send}}(t)}{dt} \le 0 \implies \tau_{\text{stall}} \to \infty$$
+
+$$
+\lambda_{\text{burst}} - \mu = 105{,}100 - 184{,}320 \le 0
+$$
+
+$$
+\frac{dQ_{\text{send}}(t)}{dt} \le 0 \implies \tau_{\text{stall}} \to \infty
+$$
+
 *The send queue remains in steady-state draining, mathematically precluding buffer starvation.*
 
 ---
@@ -200,28 +278,49 @@ To formalize the architectural failure and verify our mitigation, we model the s
 
 #### Session Calculus Syntax
 Let $\mathcal{P} = \{\text{Client}_i, \text{Gateway}, \text{Gameserver}, \text{Delivery}\}$ be the set of interacting roles. The global interaction type $\mathcal{G}$ is defined by the grammar:
-$$\mathcal{G} ::= \mathbf{p} \to \mathbf{q} : k\langle U \rangle . \mathcal{G} \;\mid\; \mathbf{p} \to \mathbf{q} : \{l_j : \mathcal{G}_j\}_{j \in J} \;\mid\; \mu \mathbf{t}. \mathcal{G} \;\mid\; \mathbf{t} \;\mid\; \mathbf{end}$$
+
+$$
+\mathcal{G} ::= \mathbf{p} \to \mathbf{q} : k\langle U \rangle . \mathcal{G} \;\mid\; \mathbf{p} \to \mathbf{q} : \{l_j : \mathcal{G}_j\}_{j \in J} \;\mid\; \mu \mathbf{t}. \mathcal{G} \;\mid\; \mathbf{t} \;\mid\; \text{end}
+$$
+
 where $\mathbf{p} \to \mathbf{q} : k\langle U \rangle$ denotes role $\mathbf{p}$ sending a message of opcode $k$ carrying payload type $U$ to role $\mathbf{q}$.
 
 The standard game loop session is typed as:
-$$\mathcal{G}_{\text{game}} = \mu \mathbf{t}. \text{Client}_i \to \text{Gateway} : \text{Packet}\langle U_{\text{raw}} \rangle . \text{Gateway} \to \text{Gameserver} : \text{Relay}\langle \text{UID}_i, U_{\text{raw}} \rangle . \mathcal{G}_{\text{eval}}$$
-$$\mathcal{G}_{\text{eval}} = \text{Gameserver} \to \text{Gateway} : \begin{cases} 
+
+$$
+\mathcal{G}_{\text{game}} = \mu \mathbf{t}. \text{Client}_i \to \text{Gateway} : \text{Packet}\langle U_{\text{raw}} \rangle . \text{Gateway} \to \text{Gameserver} : \text{Relay}\langle \text{UID}_i, U_{\text{raw}} \rangle . \mathcal{G}_{\text{eval}}
+$$
+
+$$
+\mathcal{G}_{\text{eval}} = \text{Gameserver} \to \text{Gateway} : \begin{cases} 
 \text{ok}\langle U_{\text{state}} \rangle & \to \text{Gateway} \to \text{Client}_i : \text{Sync}\langle U_{\text{state}} \rangle . \mathbf{t} \\ 
 \text{err}\langle \text{ErrCode} \rangle & \to \mathcal{G}_{\text{abort}} 
-\end{cases}$$
+\end{cases}
+$$
 
 #### The Legacy Non-Affine Crash Vulnerability
 In the legacy implementation, the error projection at the Gateway is **non-affine**:
-$$\mathcal{G}_{\text{abort}}^{\text{legacy}} = \text{Gateway} \to \forall j \in \{1 \dots N\} : \text{DropSession}\langle \text{Fatal} \rangle . \mathbf{end}$$
+
+$$
+\mathcal{G}_{\text{abort}}^{\text{legacy}} = \text{Gateway} \to \forall j \in \{1 \dots N\} : \text{DropSession}\langle \text{Fatal} \rangle . \text{end}
+$$
+
 The failure of one player's message ($i$) poisons the entire multi-role session projection, terminating all $N$ peers.
 
 #### Proposed Affine Runtime Guard
 PW-Sentry introduces an affine typing projection $\Gamma \vdash \text{Quarantine}(u_i)$:
-$$\mathcal{G}_{\text{abort}}^{\text{proposed}} = \text{PW-Sentry} \to \text{Gateway} : \text{Isolate}\langle \text{UID}_i \rangle . \text{Gameserver} \to \text{ActiveSessions} \setminus \{u_i\} : \mathbf{t}$$
+
+$$
+\mathcal{G}_{\text{abort}}^{\text{proposed}} = \text{PW-Sentry} \to \text{Gateway} : \text{Isolate}\langle \text{UID}_i \rangle . \text{Gameserver} \to \text{ActiveSessions} \setminus \{u_i\} : \mathbf{t}
+$$
 
 #### Theorem 2 (Affine Session Isolation Theorem)
 *Under PW-Sentry's affine projection guard, if sub-session $u_x$ induces a state policy violation or socket stall, the active session context satisfies:*
-$$\Gamma, u_x : \text{FaultySession} \vdash \text{Quarantine}(u_x) \rhd \mathcal{G}_{\text{game}}(\mathcal{P} \setminus \{u_x\})$$
+
+$$
+\Gamma, \, u_x : \text{FaultySession} \vdash \text{Quarantine}(u_x) \triangleright \mathcal{G}_{\text{game}}(\mathcal{P} \setminus \{u_x\})
+$$
+
 *ensuring that communication among the remaining $N-1$ players continues without deadlock or session termination.*
 
 *Proof.*  
@@ -237,41 +336,75 @@ $$\Gamma, u_x : \text{FaultySession} \vdash \text{Quarantine}(u_x) \rhd \mathcal
 
 To provide probabilistic detection across zero-day mutations of this exploit, PW-Sentry computes an aggregated anomaly score $\mathcal{S}_t \in [0, 100]$ at sampling interval $\Delta t = 1.0\text{ s}$:
 
-$$\mathcal{S}_t = w_1 \cdot \widetilde{\Delta}_{\text{RST}}(t) + w_2 \cdot \widetilde{Z}_t(\text{RPC}) + w_3 \cdot \mathbb{I}_{\text{policy}}(t) + w_4 \cdot \big(1 - \widetilde{H}_t\big)$$
+$$
+\mathcal{S}_t = w_1 \cdot \tilde{\Delta}_{\text{RST}}(t) + w_2 \cdot \tilde{Z}_t(\text{RPC}) + w_3 \cdot \mathbb{I}_{\text{policy}}(t) + w_4 \cdot \big(1 - \tilde{H}_t\big)
+$$
 
 where:
-1. **Normalized TCP RST Differential ($\widetilde{\Delta}_{\text{RST}}$):**
-   $$\Delta_{\text{RST}}(t) = \text{RST}_{\text{out}}(t) - \text{RST}_{\text{out}}(t - \Delta t)$$
-   $$\widetilde{\Delta}_{\text{RST}}(t) = \min\left(1.0, \; \frac{\Delta_{\text{RST}}(t)}{\theta_{\text{RST}}}\right), \quad \theta_{\text{RST}} = 100\text{ packets/s}$$
+1. **Normalized TCP RST Differential ($\tilde{\Delta}_{\text{RST}}$):**
 
-2. **Sliding-Window EWMA Behavioral RPC Score ($\widetilde{Z}_t$):**
+   $$
+   \Delta_{\text{RST}}(t) = \text{RST}_{\text{out}}(t) - \text{RST}_{\text{out}}(t - \Delta t)
+   $$
+
+   $$
+   \tilde{\Delta}_{\text{RST}}(t) = \min\left(1.0, \; \frac{\Delta_{\text{RST}}(t)}{\theta_{\text{RST}}}\right), \quad \theta_{\text{RST}} = 100\text{ packets/s}
+   $$
+
+2. **Sliding-Window EWMA Behavioral RPC Score ($\tilde{Z}_t$):**  
    For each active role $u \in \text{Players}$, incoming RPC events are weighted by operational hazard weight $\omega(k)$ (e.g., movement $= 1$, combat $= 2$, auction $= 15$, mail item $= 12$):
-   $$X_t(u) = \sum_{k \in \text{Events}(u, t)} \omega(k)$$
+
+   $$
+   X_t(u) = \sum_{k \in \text{Events}(u, t)} \omega(k)
+   $$
+
    The Exponentially Weighted Moving Average is updated recursively:
-   $$Z_t(u) = \alpha \cdot X_t(u) + (1 - \alpha) \cdot Z_{t-1}(u), \quad \alpha = 0.25$$
-   $$\widetilde{Z}_t = \max_{u} \min\left(1.0, \; \frac{Z_t(u)}{\theta_{\text{EWMA}}}\right), \quad \theta_{\text{EWMA}} = 50.0$$
+
+   $$
+   Z_t(u) = \alpha \cdot X_t(u) + (1 - \alpha) \cdot Z_{t-1}(u), \quad \alpha = 0.25
+   $$
+
+   $$
+   \tilde{Z}_t = \max_{u} \min\left(1.0, \; \frac{Z_t(u)}{\theta_{\text{EWMA}}}\right), \quad \theta_{\text{EWMA}} = 50.0
+   $$
 
 3. **Protocol Policy Invariance Indicator ($\mathbb{I}_{\text{policy}}$):**
-   $$\mathbb{I}_{\text{policy}}(t) = \begin{cases} 
+
+   $$
+   \mathbb{I}_{\text{policy}}(t) = \begin{cases} 
    1.0, & \text{if } \exists p : (s = s_{\text{handshake}} \land \text{len}(p) > 60) \lor (\text{abort-detected}) \\ 
    0.0, & \text{otherwise} 
-   \end{cases}$$
+   \end{cases}
+   $$
 
-4. **Normalized Shannon Packet Entropy ($\widetilde{H}_t$):**
+4. **Normalized Shannon Packet Entropy ($\tilde{H}_t$):**  
    Let $p(k)$ be the empirical probability distribution of opcode $k$ observed over window $W = 100$ packets:
-   $$H_t = -\sum_{k=1}^K p(k) \log_2 p(k)$$
-   $$\widetilde{H}_t = \frac{H_t}{\log_2 K}$$
-   Under exploit flooding, opcode entropy collapses toward zero ($\widetilde{H}_t \to 0$).
+
+   $$
+   H_t = -\sum_{k=1}^K p(k) \log_2 p(k)
+   $$
+
+   $$
+   \tilde{H}_t = \frac{H_t}{\log_2 K}
+   $$
+
+   Under exploit flooding, opcode entropy collapses toward zero ($\tilde{H}_t \to 0$).
 
 #### Tuned Weight Coefficients
-$$\sum_{j=1}^4 w_j = 100, \quad w_1 = 30, \; w_2 = 25, \; w_3 = 35, \; w_4 = 10$$
+
+$$
+\sum_{j=1}^4 w_j = 100, \quad w_1 = 30, \; w_2 = 25, \; w_3 = 35, \; w_4 = 10
+$$
 
 #### Operational Decision Rule
-$$\text{State}(t) = \begin{cases} 
+
+$$
+\text{State}(t) = \begin{cases} 
 \text{NORMAL}, & \mathcal{S}_t < 40 \\ 
 \text{WARNING (Throttle RPC Queue)}, & 40 \le \mathcal{S}_t < 70 \\ 
 \text{CRITICAL (Trigger Affine Quarantine)}, & \mathcal{S}_t \ge 70 
-\end{cases}$$
+\end{cases}
+$$
 
 ---
 
@@ -304,7 +437,7 @@ flowchart TD
 2. **Layer 2: Protocol State Inspector (`log_stream.py`):**  
    Attaches non-blocking `inotify` watches to active engine logs (`glink1.log`, `gs01.err.log`). Uses zero-copy regex compilation to catch size-policy mismatches (`type=75, size=10510, acceptsize=60`) and provider abort notifications (`OnAbortSession 0`) within microseconds of emission.
 3. **Layer 3: EWMA Behavioral Rate Scorer (`sliding_window.py`):**  
-   Maintains a thread-safe in-memory cache of active role IDs. Evaluates the multi-layer anomaly scoring formula $\mathcal{S}_t$.
+   Maintains a thread-safe in-memory cache of active role IDs. Evaluates the multi-layer anomaly scoring formula.
 4. **Layer 4: Adaptive Circuit Breaker & Quarantine (`mitigator.py`):**  
    Executes multi-stage graduated containment:
    - **Step 1 (Firewall Drop):** Adds source IP to `iptables -I INPUT 1 -s <IP> -j DROP`.
@@ -331,17 +464,17 @@ All empirical experiments were performed on a production-grade bare-metal server
 Table 1 presents the empirical comparison between the unmitigated baseline server and the server protected by PW-Sentry under simulated exploit execution. All metrics were sampled continuously over a 2-hour window.
 
 #### Table 1: Comprehensive Macro Resilience Benchmarks (Ready-to-Plot)
-| Performance Metric | Baseline (Unmitigated) | PW-Sentry (Proposed) | Metric Unit | Relative Impact | $p$-value ($t$-test) |
+| Performance Metric | Baseline (Unmitigated) | PW-Sentry (Proposed) | Metric Unit | Relative Impact | p-value (t-test) |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **TCP RST Packets / Hour** | $49{,}462{,}030 \pm 2{,}480{,}112$ | $437 \pm 42$ | packets | **-99.999%** | $< 0.0001$ |
-| **1-Minute CPU Load** | $16.85 \pm 1.42$ | $1.18 \pm 0.19$ | load units | **-92.99%** | $< 0.0001$ |
-| **CPU Utilization** | $88.4\% \pm 5.2\%$ | $14.6\% \pm 2.1\%$ | percent | **-83.48%** | $< 0.0001$ |
-| **Error Log Growth** | $12{,}450 \pm 1{,}180$ | $0 \pm 0$ | lines / min | **-100.00%** | $< 0.0001$ |
-| **Session Drop Rate** | $100.0\% \pm 0.0\%$ | $0.0\% \pm 0.0\%$ | percent | **-100.00%** | $< 0.0001$ |
-| **Client RTT Latency** | $412.5 \pm 84.2$ | $28.4 \pm 4.1$ | ms | **-93.12%** | $< 0.0001$ |
-| **Socket Stall Events** | $842 \pm 53$ | $0 \pm 0$ | events / hr | **-100.00%** | $< 0.0001$ |
-| **IDS Memory RSS** | N/A | $32.4 \pm 1.8$ | MB | Negligible | N/A |
-| **IDS CPU Consumption** | N/A | $0.18\% \pm 0.04\%$ | percent | Negligible | N/A |
+| **TCP RST Packets / Hour** | 49,462,030 ± 2,480,112 | 437 ± 42 | packets | **-99.999%** | < 0.0001 |
+| **1-Minute CPU Load** | 16.85 ± 1.42 | 1.18 ± 0.19 | load units | **-92.99%** | < 0.0001 |
+| **CPU Utilization** | 88.4% ± 5.2% | 14.6% ± 2.1% | percent | **-83.48%** | < 0.0001 |
+| **Error Log Growth** | 12,450 ± 1,180 | 0 ± 0 | lines / min | **-100.00%** | < 0.0001 |
+| **Session Drop Rate** | 100.0% ± 0.0% | 0.0% ± 0.0% | percent | **-100.00%** | < 0.0001 |
+| **Client RTT Latency** | 412.5 ± 84.2 | 28.4 ± 4.1 | ms | **-93.12%** | < 0.0001 |
+| **Socket Stall Events** | 842 ± 53 | 0 ± 0 | events / hr | **-100.00%** | < 0.0001 |
+| **IDS Memory RSS** | N/A | 32.4 ± 1.8 | MB | Negligible | N/A |
+| **IDS CPU Consumption** | N/A | 0.18% ± 0.04% | percent | Negligible | N/A |
 
 *Direct CSV download:* [`dataset/benchmark_system_comparison.csv`](file:///home/pw-sentry-ids/dataset/benchmark_system_comparison.csv)
 
@@ -362,41 +495,41 @@ ids_cpu_usage,0,0,0.18,0.04,percent,N/A,N/A
 
 ### 5.3 Micro Benchmarks: Concurrency vs. Socket Drain Latency & Eviction Rate
 
-We conducted stress testing by sweeping concurrency levels $N \in \{10, 25, 50, 100, 250, 500\}$ across five payload sizes: $64\text{ B}$ (movement), $512\text{ B}$ (combat), $1024\text{ B}$ (chat/whisper), $4096\text{ B}$ (guild roster), and $10{,}510\text{ B}$ (auction inventory).
+We conducted stress testing by sweeping concurrency levels N in {10, 25, 50, 100, 250, 500} across five payload sizes: 64 B (movement), 512 B (combat), 1024 B (chat/whisper), 4096 B (guild roster), and 10,510 B (auction inventory).
 
-#### Table 2: Concurrency Stress Test Matrix (Latency in $\mu\text{s}$ & Eviction %)
-| Concurrency ($N$) | Payload (Bytes) | Baseline Latency ($\mu\text{s}$) | Proposed Latency ($\mu\text{s}$) | Baseline Drop Rate (%) | Proposed Drop Rate (%) | Latency Speedup |
+#### Table 2: Concurrency Stress Test Matrix (Latency in µs & Eviction %)
+| Concurrency (N) | Payload (Bytes) | Baseline Latency (µs) | Proposed Latency (µs) | Baseline Drop Rate (%) | Proposed Drop Rate (%) | Latency Speedup |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **10** | 64 | $48.2$ | $14.5$ | 0.0% | 0.0% | $3.32\times$ |
-| **10** | 512 | $85.4$ | $22.1$ | 0.0% | 0.0% | $3.86\times$ |
-| **10** | 1024 | $142.0$ | $34.8$ | 0.0% | 0.0% | $4.08\times$ |
-| **10** | 4096 | $410.8$ | $78.2$ | 0.0% | 0.0% | $5.25\times$ |
-| **10** | 10510 | $1{,}280.4$ | $142.6$ | 0.0% | 0.0% | $8.98\times$ |
-| **25** | 64 | $98.6$ | $26.4$ | 0.0% | 0.0% | $3.73\times$ |
-| **25** | 512 | $192.1$ | $41.2$ | 0.0% | 0.0% | $4.66\times$ |
-| **25** | 1024 | $310.5$ | $62.8$ | 0.0% | 0.0% | $4.94\times$ |
-| **25** | 4096 | $980.2$ | $135.4$ | 0.0% | 0.0% | $7.24\times$ |
-| **25** | 10510 | $3{,}420.0$ | $248.1$ | 4.2% | 0.0% | $13.78\times$ |
-| **50** | 64 | $185.2$ | $42.8$ | 0.0% | 0.0% | $4.33\times$ |
-| **50** | 512 | $380.4$ | $74.5$ | 0.0% | 0.0% | $5.11\times$ |
-| **50** | 1024 | $680.0$ | $112.0$ | 0.0% | 0.0% | $6.07\times$ |
-| **50** | 4096 | $2{,}450.8$ | $245.0$ | 12.5% | 0.0% | $10.00\times$ |
-| **50** | 10510 | $14{,}820.5$ | $410.2$ | **68.4%** | **0.0%** | **$36.13\times$** |
-| **100** | 64 | $360.5$ | $78.2$ | 0.0% | 0.0% | $4.61\times$ |
-| **100** | 512 | $780.2$ | $138.4$ | 2.1% | 0.0% | $5.64\times$ |
-| **100** | 1024 | $1{,}420.0$ | $210.5$ | 8.4% | 0.0% | $6.75\times$ |
-| **100** | 4096 | $8{,}940.0$ | $460.8$ | 44.2% | 0.0% | $19.40\times$ |
-| **100** | 10510 | $58{,}200.0$ | $780.4$ | **100.0%** | **0.0%** | **$74.58\times$** |
-| **250** | 64 | $940.0$ | $165.2$ | 0.0% | 0.0% | $5.69\times$ |
-| **250** | 512 | $2{,}100.4$ | $285.0$ | 8.5% | 0.0% | $7.37\times$ |
-| **250** | 1024 | $4{,}200.8$ | $420.1$ | 24.1% | 0.0% | $10.00\times$ |
-| **250** | 4096 | $28{,}400.0$ | $890.5$ | 86.2% | 0.0% | $31.89\times$ |
-| **250** | 10510 | $124{,}000.0$ | $1{,}520.0$ | **100.0%** | **0.0%** | **$81.58\times$** |
-| **500** | 64 | $2{,}150.0$ | $312.4$ | 4.2% | 0.0% | $6.88\times$ |
-| **500** | 512 | $5{,}420.0$ | $540.2$ | 22.0% | 0.0% | $10.03\times$ |
-| **500** | 1024 | $11{,}200.0$ | $790.6$ | 58.4% | 0.0% | $14.17\times$ |
-| **500** | 4096 | $72{,}000.0$ | $1{,}680.4$ | 100.0% | 0.0% | $42.85\times$ |
-| **500** | 10510 | $298{,}000.0$ | $2{,}840.0$ | **100.0%** | **0.0%** | **$104.93\times$** |
+| **10** | 64 | 48.2 | 14.5 | 0.0% | 0.0% | 3.32x |
+| **10** | 512 | 85.4 | 22.1 | 0.0% | 0.0% | 3.86x |
+| **10** | 1024 | 142.0 | 34.8 | 0.0% | 0.0% | 4.08x |
+| **10** | 4096 | 410.8 | 78.2 | 0.0% | 0.0% | 5.25x |
+| **10** | 10510 | 1,280.4 | 142.6 | 0.0% | 0.0% | 8.98x |
+| **25** | 64 | 98.6 | 26.4 | 0.0% | 0.0% | 3.73x |
+| **25** | 512 | 192.1 | 41.2 | 0.0% | 0.0% | 4.66x |
+| **25** | 1024 | 310.5 | 62.8 | 0.0% | 0.0% | 4.94x |
+| **25** | 4096 | 980.2 | 135.4 | 0.0% | 0.0% | 7.24x |
+| **25** | 10510 | 3,420.0 | 248.1 | 4.2% | 0.0% | 13.78x |
+| **50** | 64 | 185.2 | 42.8 | 0.0% | 0.0% | 4.33x |
+| **50** | 512 | 380.4 | 74.5 | 0.0% | 0.0% | 5.11x |
+| **50** | 1024 | 680.0 | 112.0 | 0.0% | 0.0% | 6.07x |
+| **50** | 4096 | 2,450.8 | 245.0 | 12.5% | 0.0% | 10.00x |
+| **50** | 10510 | 14,820.5 | 410.2 | **68.4%** | **0.0%** | **36.13x** |
+| **100** | 64 | 360.5 | 78.2 | 0.0% | 0.0% | 4.61x |
+| **100** | 512 | 780.2 | 138.4 | 2.1% | 0.0% | 5.64x |
+| **100** | 1024 | 1,420.0 | 210.5 | 8.4% | 0.0% | 6.75x |
+| **100** | 4096 | 8,940.0 | 460.8 | 44.2% | 0.0% | 19.40x |
+| **100** | 10510 | 58,200.0 | 780.4 | **100.0%** | **0.0%** | **74.58x** |
+| **250** | 64 | 940.0 | 165.2 | 0.0% | 0.0% | 5.69x |
+| **250** | 512 | 2,100.4 | 285.0 | 8.5% | 0.0% | 7.37x |
+| **250** | 1024 | 4,200.8 | 420.1 | 24.1% | 0.0% | 10.00x |
+| **250** | 4096 | 28,400.0 | 890.5 | 86.2% | 0.0% | 31.89x |
+| **250** | 10510 | 124,000.0 | 1,520.0 | **100.0%** | **0.0%** | **81.58x** |
+| **500** | 64 | 2,150.0 | 312.4 | 4.2% | 0.0% | 6.88x |
+| **500** | 512 | 5,420.0 | 540.2 | 22.0% | 0.0% | 10.03x |
+| **500** | 1024 | 11,200.0 | 790.6 | 58.4% | 0.0% | 14.17x |
+| **500** | 4096 | 72,000.0 | 1,680.4 | 100.0% | 0.0% | 42.85x |
+| **500** | 10510 | 298,000.0 | 2,840.0 | **100.0%** | **0.0%** | **104.93x** |
 
 *Direct CSV download:* [`dataset/benchmark_concurrency_latency.csv`](file:///home/pw-sentry-ids/dataset/benchmark_concurrency_latency.csv)
 
@@ -407,13 +540,13 @@ We conducted stress testing by sweeping concurrency levels $N \in \{10, 25, 50, 
 To address **RQ2**, Table 3 details the execution latency and resource footprint across all four sub-modules of the PW-Sentry pipeline.
 
 #### Table 3: Computational Latency and Resource Footprint per Module
-| Architectural Pipeline Module | Execution Layer | Mean Latency ($\mu\text{s}$) | 99th Percentile ($\mu\text{s}$) | CPU Usage (%) | Memory RSS (MB) | Peak Throughput (events/sec) |
+| Architectural Pipeline Module | Execution Layer | Mean Latency (µs) | 99th Percentile (µs) | CPU Usage (%) | Memory RSS (MB) | Peak Throughput (events/sec) |
 | :--- | :--- | :---: | :---: | :---: | :---: | :---: |
-| **Kernel Socket Collector** | Layer 1 (L4 Kernel) | $4.2$ | $12.8$ | $0.04\%$ | $8.2$ | $150{,}000$ |
-| **Protocol State Inspector** | Layer 2 (L7 State Machine) | $18.5$ | $45.2$ | $0.08\%$ | $12.5$ | $45{,}000$ |
-| **EWMA Behavioral Scorer** | Layer 3 (L7 Statistical) | $8.1$ | $21.0$ | $0.03\%$ | $5.1$ | $80{,}000$ |
-| **Circuit Breaker Mitigator** | Layer 4 (OS Enforcement) | $142.0$ | $380.0$ | $0.03\%$ | $6.6$ | $1{,}200$ |
-| **Total Integrated Pipeline** | **End-to-End** | **$172.8$** | **$459.0$** | **$0.18\%$** | **$32.4$** | **$12{,}000$** |
+| **Kernel Socket Collector** | Layer 1 (L4 Kernel) | 4.2 | 12.8 | 0.04% | 8.2 | 150,000 |
+| **Protocol State Inspector** | Layer 2 (L7 State Machine) | 18.5 | 45.2 | 0.08% | 12.5 | 45,000 |
+| **EWMA Behavioral Scorer** | Layer 3 (L7 Statistical) | 8.1 | 21.0 | 0.03% | 5.1 | 80,000 |
+| **Circuit Breaker Mitigator** | Layer 4 (OS Enforcement) | 142.0 | 380.0 | 0.03% | 6.6 | 1,200 |
+| **Total Integrated Pipeline** | **End-to-End** | **172.8** | **459.0** | **0.18%** | **32.4** | **12,000** |
 
 *Direct CSV download:* [`dataset/benchmark_layer_overhead.csv`](file:///home/pw-sentry-ids/dataset/benchmark_layer_overhead.csv)
 
@@ -421,17 +554,17 @@ To address **RQ2**, Table 3 details the execution latency and resource footprint
 
 ### 5.5 Classification Performance & Confusion Matrix
 
-We evaluated detection efficacy across $45{,}000$ synthetically tagged packet streams encompassing four attack categories and benign high-intensity PvP/raid gameplay.
+We evaluated detection efficacy across 45,000 synthetically tagged packet streams encompassing four attack categories and benign high-intensity PvP/raid gameplay.
 
 #### Table 4: Multi-Class Detection & Classification Performance Metrics
 | Evaluated Scenario | Total Samples | True Pos (TP) | False Pos (FP) | True Neg (TN) | False Neg (FN) | Precision | Recall (TPR) | F1-Score | ROC-AUC |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| **L4 RST/SYN Flood** | $10{,}000$ | $9{,}985$ | $12$ | $8{,}988$ | $15$ | $0.9988$ | $0.9985$ | $0.9986$ | $0.9991$ |
-| **L7 State-Size Desync (Type 75)** | $5{,}000$ | $5{,}000$ | $0$ | $5{,}000$ | $0$ | **$1.0000$** | **$1.0000$** | **$1.0000$** | **$1.0000$** |
-| **Auction RPC Burst Spam** | $5{,}000$ | $4{,}960$ | $18$ | $4{,}982$ | $40$ | $0.9964$ | $0.9920$ | $0.9942$ | $0.9958$ |
-| **Malformed Opcode Injection** | $5{,}000$ | $4{,}995$ | $4$ | $4{,}996$ | $5$ | $0.9992$ | $0.9990$ | $0.9991$ | $0.9994$ |
-| **Benign Mass PvP (Noise)** | $20{,}000$ | $0$ | $24$ | $19{,}976$ | $0$ | N/A | $1.0000$ | N/A | $0.9988$ |
-| **Macro Average / Overall** | **$45{,}000$** | **$24{,}940$** | **$58$** | **$43{,}942$** | **$60$** | **$0.9977$** | **$0.9974$** | **$0.9975$** | **$0.9986$** |
+| **L4 RST/SYN Flood** | 10,000 | 9,985 | 12 | 8,988 | 15 | 0.9988 | 0.9985 | 0.9986 | 0.9991 |
+| **L7 State-Size Desync (Type 75)** | 5,000 | 5,000 | 0 | 5,000 | 0 | **1.0000** | **1.0000** | **1.0000** | **1.0000** |
+| **Auction RPC Burst Spam** | 5,000 | 4,960 | 18 | 4,982 | 40 | 0.9964 | 0.9920 | 0.9942 | 0.9958 |
+| **Malformed Opcode Injection** | 5,000 | 4,995 | 4 | 4,996 | 5 | 0.9992 | 0.9990 | 0.9991 | 0.9994 |
+| **Benign Mass PvP (Noise)** | 20,000 | 0 | 24 | 19,976 | 0 | N/A | 1.0000 | N/A | 0.9988 |
+| **Macro Average / Overall** | **45,000** | **24,940** | **58** | **43,942** | **60** | **0.9977** | **0.9974** | **0.9975** | **0.9986** |
 
 *Direct CSV download:* [`dataset/benchmark_confusion_matrix.csv`](file:///home/pw-sentry-ids/dataset/benchmark_confusion_matrix.csv)
 
@@ -457,9 +590,9 @@ Outputs are written to [`figures/`](file:///home/pw-sentry-ids/figures/):
 Our findings demonstrate that conventional perimeter defenses (e.g., L3/L4 DDoS scrubbers, volumetric firewalls) are intrinsically incapable of preventing state-size desynchronization attacks. In this attack class:
 1. Every packet conforms to the binary framing specification;
 2. Packets carry legitimate authentication credentials;
-3. Traffic volume remains well below DDoS detection thresholds ($< 15\text{ KB/s}$).
+3. Traffic volume remains well below DDoS detection thresholds (< 15 KB/s).
 
-The vulnerability exists entirely in the **temporal and state-dependent semantics** of the distributed protocol: delivering an otherwise legitimate $10{,}510$-byte inventory payload during the $60$-byte handshake phase violates the receiver's state invariant, inducing a fatal crash.
+The vulnerability exists entirely in the **temporal and state-dependent semantics** of the distributed protocol: delivering an otherwise legitimate 10,510-byte inventory payload during the 60-byte handshake phase violates the receiver's state invariant, inducing a fatal crash.
 
 ### 6.2 Generalizability to Other Game Netcodes
 Although our empirical evaluation was conducted on the Wanmei / Perfect World engine, the theoretical models developed in Section 3 apply universally to stateful binary architectures:
@@ -468,13 +601,13 @@ Although our empirical evaluation was conducted on the Wanmei / Perfect World en
 - **Unity Netcode for Entities / DarkRift:** High-frequency binary serialization over TCP without explicit backpressure control triggers bufferbloat and subsequent disconnection watchdogs.
 
 ### 6.3 Limitations and Future Work
-While PW-Sentry operates with an ultra-low overhead ($0.18\%$ CPU), its L7 log-streaming layer incurs an average latency of $18.5\,\mu\text{s}$. Future work will explore porting Layer 1 and Layer 2 directly into the Linux kernel using **eBPF (Extended Berkeley Packet Filter)** and **XDP (eXpress Data Path)**. By inspecting binary protocol opcodes inside the network driver queue, packets violating handshake invariance can be dropped before consuming kernel socket memory.
+While PW-Sentry operates with an ultra-low overhead (0.18% CPU), its L7 log-streaming layer incurs an average latency of 18.5 µs. Future work will explore porting Layer 1 and Layer 2 directly into the Linux kernel using **eBPF (Extended Berkeley Packet Filter)** and **XDP (eXpress Data Path)**. By inspecting binary protocol opcodes inside the network driver queue, packets violating handshake invariance can be dropped before consuming kernel socket memory.
 
 ---
 
 ## 7. Conclusion
 
-In this paper, we presented the first comprehensive formalization and empirical mitigation of Cascading Session Eviction in distributed MMORPG architectures. By unifying Extended Finite State Machines (EFSM), fluid socket queue dynamics, and Multiparty Session Types (MPST) with affine failure semantics, we explained how legitimate high-volume RPC queries transform into denial-of-service loops over state-desynchronized channels. We developed **PW-Sentry**, a lightweight, four-tier hybrid intrusion detection and mitigation system. Empirical validation across 550 active players demonstrated a **99.999%** reduction in TCP reset storms, a **92.99%** decrease in server load, complete prevention of mass player disconnections (**100% availability**), and near-perfect detection accuracy ($\text{ROC-AUC} = 0.9986$, $\text{F1} = 0.9975$) with negligible computational overhead ($< 35$ MB RAM, $< 0.2\%$ CPU).
+In this paper, we presented the first comprehensive formalization and empirical mitigation of Cascading Session Eviction in distributed MMORPG architectures. By unifying Extended Finite State Machines (EFSM), fluid socket queue dynamics, and Multiparty Session Types (MPST) with affine failure semantics, we explained how legitimate high-volume RPC queries transform into denial-of-service loops over state-desynchronized channels. We developed **PW-Sentry**, a lightweight, four-tier hybrid intrusion detection and mitigation system. Empirical validation across 550 active players demonstrated a **99.999%** reduction in TCP reset storms, a **92.99%** decrease in server load, complete prevention of mass player disconnections (**100% availability**), and near-perfect detection accuracy (ROC-AUC = 0.9986, F1 = 0.9975) with negligible computational overhead (< 35 MB RAM, < 0.2% CPU).
 
 ---
 
