@@ -117,7 +117,7 @@ In multiparty distributed interactions, communication protocols are formalized a
 We formalize the gateway-to-gameserver session lifecycle as an Extended Finite State Machine:
 $$\mathcal{M} = \langle S, \Sigma, \mathcal{V}, T, s_0, \mathcal{G}, \mathcal{A} \rangle$$
 where:
-- $S = \{s_{\text{init}}, s_{\text{handshake}}, s_{\text{authenticated}}, s_{\text{in\_world}}, s_{\text{quarantined}}, s_{\text{terminated}}\}$ represents the set of operational session states;
+- $S = \{s_{\text{init}}, s_{\text{handshake}}, s_{\text{authenticated}}, s_{\text{world}}, s_{\text{quarantined}}, s_{\text{terminated}}\}$ represents the set of operational session states;
 - $\Sigma = \{p_{\text{syn}}, p_{\text{ack}}, p_{\text{ident}}, p_{\text{auth}}, p_{\text{rpc}}, p_{\text{raw}}, p_{\text{rst}}\}$ denotes the input alphabet of binary packet tokens;
 - $\mathcal{V} = \{L_{\text{pkt}}, S_{\text{accept}}, \text{UID}, \text{RoleID}, Q_{\text{backlog}}\}$ represents the evaluation variable set;
 - $s_0 = s_{\text{init}}$ is the initial entry state;
@@ -133,20 +133,20 @@ $$\mathcal{G}_{\text{hs}}(p) \triangleq \begin{cases}
 \end{cases}$$
 
 #### Theorem 1 (Cascading Rejection Theorem)
-*Let a shared gateway session $\sigma_{\text{gw}}$ contain $k$ multiplexed player streams $\{u_1, u_2, \dots, u_k\}$. If an in-flight packet $p_x$ belonging to user $u_x$ with $\text{len}(p_x) = 10{,}510\text{ bytes}$ is presented to the engine while $s(\sigma_{\text{gw}}) = s_{\text{handshake}}$, the state machine transitions deterministically to $s_{\text{terminated}}$, triggering an unmitigated global session eviction $\mathcal{A}_{\text{drop\_all}}$:*
-$$T(s_{\text{handshake}}, p_x, \neg \mathcal{G}_{\text{hs}}(p_x)) \longrightarrow (s_{\text{terminated}}, \mathcal{A}_{\text{drop\_all}})$$
+*Let a shared gateway session $\sigma_{\text{gw}}$ contain $k$ multiplexed player streams $\{u_1, u_2, \dots, u_k\}$. If an in-flight packet $p_x$ belonging to user $u_x$ with $\text{len}(p_x) = 10{,}510\text{ bytes}$ is presented to the engine while $s(\sigma_{\text{gw}}) = s_{\text{handshake}}$, the state machine transitions deterministically to $s_{\text{terminated}}$, triggering an unmitigated global session eviction $\mathcal{A}_{\text{evict}}$:*
+$$T(s_{\text{handshake}}, p_x, \neg \mathcal{G}_{\text{hs}}(p_x)) \longrightarrow (s_{\text{terminated}}, \mathcal{A}_{\text{evict}})$$
 *such that $\forall i \in \{1, \dots, k\}$, player $u_i$ is disconnected.*
 
 *Proof.*  
 1. When $\sigma_{\text{gw}}$ disconnects due to socket backpressure, its state resets to $s_0 = s_{\text{init}}$.
-2. Upon TCP 3-way handshake completion, $T(s_{\text{init}}, p_{\text{ack}}, \text{True}) \to (s_{\text{handshake}}, \mathcal{A}_{\text{alloc\_sid}})$, setting $S_{\text{accept}} = 60\text{ bytes}$.
+2. Upon TCP 3-way handshake completion, $T(s_{\text{init}}, p_{\text{ack}}, \text{True}) \to (s_{\text{handshake}}, \mathcal{A}_{\text{alloc}})$, setting $S_{\text{accept}} = 60\text{ bytes}$.
 3. In legacy `glinkd`, pending packet queues are not segregated by state maturity. The head-of-line packet in the output queue is $p_x$ (`type=75`, $\text{len}(p_x) = 10{,}510$).
 4. The gameserver evaluates $\mathcal{G}_{\text{hs}}(p_x)$:
    $$\text{len}(p_x) = 10{,}510 > 60 = S_{\text{accept}} \implies \mathcal{G}_{\text{hs}}(p_x) = \text{False}$$
 5. Under legacy engine error handling, the false guard triggers the size policy rejection branch:
    $$\text{Action: } \mathcal{A}_{\text{abort}} = \{\text{Log}("Protocol state or size policy error"), \text{close}(sid), \text{SendRST}()\}$$
 6. The gateway receives the abrupt session closure and executes:
-   $$\mathcal{A}_{\text{drop\_all}} = \bigcup_{i=1}^k \{\text{EvictPlayer}(u_i), \text{ClearInWorldState}(u_i)\}$$
+   $$\mathcal{A}_{\text{evict}} = \bigcup_{i=1}^k \{\text{EvictPlayer}(u_i), \text{ClearInWorldState}(u_i)\}$$
 7. The cycle repeats ad infinitum because $p_x$ remains at the head of the gateway's unacknowledged retransmission queue. $\blacksquare$
 
 ---
@@ -162,7 +162,7 @@ where:
   $$\lambda_{\text{in}}(t) = \sum_{i=1}^N r_i(t) \cdot \overline{S}_i$$
   with $r_i(t)$ being the RPC invocation rate of player $i$ and $\overline{S}_i$ the serialized payload size;
 - $\mu_{\text{drain}}(t)$ is the effective socket draining rate:
-  $$\mu_{\text{drain}}(t) = \frac{\text{MSS}}{\text{RTT} + t_{\text{proc}}} \cdot \mathbb{I}_{(\text{TCP\_WINDOW} > 0)} \cdot (1 - \delta_{\text{Nagle}})$$
+  $$\mu_{\text{drain}}(t) = \frac{\text{MSS}}{\text{RTT} + t_{\text{proc}}} \cdot \mathbb{I}_{(\text{Window} > 0)} \cdot (1 - \delta_{\text{Nagle}})$$
   where $\delta_{\text{Nagle}} \in [0, 1)$ represents the transmission penalty introduced by Nagle's algorithm waiting for pending ACKs on small packets.
 
 ```mermaid
@@ -253,7 +253,7 @@ where:
 
 3. **Protocol Policy Invariance Indicator ($\mathbb{I}_{\text{policy}}$):**
    $$\mathbb{I}_{\text{policy}}(t) = \begin{cases} 
-   1.0, & \text{if } \exists p : (s = s_{\text{handshake}} \land \text{len}(p) > 60) \lor (\text{abort\_log\_detected}) \\ 
+   1.0, & \text{if } \exists p : (s = s_{\text{handshake}} \land \text{len}(p) > 60) \lor (\text{abort-detected}) \\ 
    0.0, & \text{otherwise} 
    \end{cases}$$
 
