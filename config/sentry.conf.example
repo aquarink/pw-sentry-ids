@@ -1,0 +1,24 @@
+{
+  "waha": {
+    "api_url": "https://waha.example.com",
+    "api_key": "YOUR_WAHA_API_KEY_HERE",
+    "session_name": "default",
+    "target_chat_id": "120363xxxxxxxxx@g.us"
+  },
+  "discord": {
+    "webhook_url": "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL_HERE"
+  },
+  "database": {
+    "host": "127.0.0.1",
+    "user": "root",
+    "password": "YOUR_DB_PASSWORD_HERE",
+    "database": "pw"
+  },
+  "log_dir": "/home/logs",
+  "thresholds": {
+    "rst_spike_per_sec": 50,
+    "max_packet_size_init": 60,
+    "burst_limit_per_role": 5,
+    "burst_window_seconds": 10
+  }
+}

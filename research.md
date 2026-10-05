@@ -82,7 +82,22 @@ AND ( "distributed systems" OR "multiplayer" ) )
 * `Protocol state machine policy violation`
 * `eBPF network observability game servers`
 
+### 3.3. Kajian Komparatif & Pengayaan dari 3 Paper Acuan Utama (`/papers/`):
+
+1. **Paper 1: *Automated Attack Synthesis by Extracting Finite State Machines from Protocol Specification Documents***
+   * **Intisari:** Mengekstrak *Finite State Machine* (FSM) dari spesifikasi protokol dan menyintesis urutan masukan yang memicu transisi status ilegal (*illegal state transitions*).
+   * **Pengayaan di Riset Kita:** Pada kasus Perfect World, penyerang mengeksploitasi celah transisi status protokol biner gateway-to-gameserver: mengirim paket game (`type=75`) berukuran $10.510$ byte ketika FSM penerima masih berada dalam status `STATE_HANDSHAKE` (hanya menerima transisi dengan *guard* $\le 60$ byte). Kami memformalkan FSM protokol biner MMORPG ini dan membuktikan bagaimana anomali ukuran muatan (*payload-size anomaly*) dapat disintesis menjadi vektor DoS internal.
+
+2. **Paper 2: *Research and Application of Network Anomaly Traffic Detection System***
+   * **Intisari:** Deteksi anomali berbasis aliran paket (*flow-based*) pada lapisan L3/L4 menggunakan ekstraksi fitur statistik dan thresholding adaptif.
+   * **Pengayaan di Riset Kita:** Paper ini menjadi pembanding *baseline* L3/L4. Kami menunjukkan keterbatasan pendekatan konvensional: serangan L7 semantik sah (`sysauctiongetitem` atau injeksi paket biner yang lolos enkripsi) memiliki karakteristik volume yang tampak normal di L3/L4 sehingga tidak terdeteksi oleh *flow-based IDS*. PW-Sentry menjembatani celah ini dengan mengkombinasikan telemetri soket L4 (`TCP RST delta`, buffer queue) dengan *state inspection* L7.
+
+3. **Paper 3: *Stay Safe under Panic: Affine Rust Programming with Multiparty Session Types (MPST)***
+   * **Intisari:** Menggunakan teori *Multiparty Session Types* (MPST) dan sistem tipe *Affine* untuk memastikan kegagalan atau kepanikan (*panic*) pada satu node terdistribusi tidak mematikan atau mengunci komunikasi node lainnya (*deadlock/cascading collapse*).
+   * **Pengayaan di Riset Kita:** Arsitektur MMORPG merupakan implementasi riil dari *multiparty session*: Client $\leftrightarrow$ Gateway (`glinkd`) $\leftrightarrow$ Gameserver (`gs`) $\leftrightarrow$ Delivery (`gdeliveryd`). Implementasi legacy C++ mengalami kelemahan fatal di mana kegagalan pada satu sesi sub-karakter (*sub-session panic*) merembet menjadi penutupan koneksi penyedia secara global (*global session termination* / *mass drop*). PW-Sentry bertindak sebagai **Runtime Affine Session Guard** yang mengisolasi (*quarantine*) sesi anomali secara lokal sehingga kegagalan tidak merambat ke ribuan pemain lainnya.
+
 ---
+
 
 ## 4. METODOLOGI (PROPOSED METHODOLOGY)
 
