@@ -118,36 +118,39 @@ In multiparty distributed interactions, communication protocols are formalized a
 
 ### 3.1 Formal Extended Finite State Machine (EFSM) Model
 
-We formalize the gateway-to-gameserver session lifecycle as an Extended Finite State Machine:
+We formalize the gateway-to-gameserver session lifecycle as an Extended Finite State Machine defined by the 7-tuple:
 
 $$
 \mathcal{M} = \langle S, \, \Sigma, \, \mathcal{V}, \, T, \, s_0, \, \mathcal{G}, \, \mathcal{A} \rangle
 $$
 
-where each formal component is defined as follows:
+The formal specification of each element is defined as follows:
 
-- **Operational State Space ($S$):**
+**1. Operational State Space ($S$):**
 
-  $$
-  S = \left\{ s_{\text{init}}, \, s_{\text{handshake}}, \, s_{\text{authenticated}}, \, s_{\text{world}}, \, s_{\text{quarantined}}, \, s_{\text{terminated}} \right\}
-  $$
+$$
+S = \left\{ s_{\text{init}}, \, s_{\text{handshake}}, \, s_{\text{authenticated}}, \, s_{\text{world}}, \, s_{\text{quarantined}}, \, s_{\text{terminated}} \right\}
+$$
 
-- **Input Token Alphabet ($\Sigma$):**
+**2. Input Token Alphabet ($\Sigma$):**
 
-  $$
-  \Sigma = \left\{ p_{\text{syn}}, \, p_{\text{ack}}, \, p_{\text{ident}}, \, p_{\text{auth}}, \, p_{\text{rpc}}, \, p_{\text{raw}}, \, p_{\text{rst}} \right\}
-  $$
+$$
+\Sigma = \left\{ p_{\text{syn}}, \, p_{\text{ack}}, \, p_{\text{ident}}, \, p_{\text{auth}}, \, p_{\text{rpc}}, \, p_{\text{raw}}, \, p_{\text{rst}} \right\}
+$$
 
-- **Evaluation State Variables ($\mathcal{V}$):**
+**3. Evaluation State Variables ($\mathcal{V}$):**
 
-  $$
-  \mathcal{V} = \left\{ L_{\text{pkt}}, \, S_{\text{accept}}, \, \text{UID}, \, \text{RoleID}, \, Q_{\text{backlog}} \right\}
-  $$
+$$
+\mathcal{V} = \left\{ L_{\text{pkt}}, \, S_{\text{accept}}, \, \text{UID}, \, \text{RoleID}, \, Q_{\text{backlog}} \right\}
+$$
 
-- **Initial Entry State:** $s_0 = s_{\text{init}}$
-- **Guard Predicates ($\mathcal{G}$):** Mapping $(\Sigma \times \mathcal{V}) \to \{\text{True}, \text{False}\}$
-- **Transition Actions ($\mathcal{A}$):** Set of kernel and application-level side-effects
-- **State Transition Function ($T$):** Mapping $S \times \Sigma \times \mathcal{G} \to S \times \mathcal{A}$
+**4. Initial Entry State:** $s_0 = s_{\text{init}}$
+
+**5. Guard Predicates ($\mathcal{G}$):** Mapping $(\Sigma \times \mathcal{V}) \to \{\text{True}, \text{False}\}$
+
+**6. Transition Actions ($\mathcal{A}$):** Set of kernel and application-level side-effects
+
+**7. State Transition Function ($T$):** Mapping $S \times \Sigma \times \mathcal{G} \to S \times \mathcal{A}$
 
 #### Definition 1 (Handshake Size Invariance Guard)
 Let $p \in \Sigma$ be an incoming packet delivered to session $\sigma$ at state $s(\sigma)$. The handshake size invariant guard $\mathcal{G}_{\text{hs}}(p)$ is defined as:
@@ -172,29 +175,31 @@ $$
 1. When $\sigma_{\text{gw}}$ disconnects due to socket backpressure, its state resets to $s_0 = s_{\text{init}}$.
 2. Upon TCP 3-way handshake completion:
 
-   $$
-   T(s_{\text{init}}, \, p_{\text{ack}}, \, \text{True}) \longrightarrow (s_{\text{handshake}}, \, \mathcal{A}_{\text{alloc}})
-   $$
+$$
+T(s_{\text{init}}, \, p_{\text{ack}}, \, \text{True}) \longrightarrow (s_{\text{handshake}}, \, \mathcal{A}_{\text{alloc}})
+$$
 
-   setting $S_{\text{accept}} = 60\text{ bytes}$.
+setting $S_{\text{accept}} = 60\text{ bytes}$.
+
 3. In legacy `glinkd`, pending packet queues are not segregated by state maturity. The head-of-line packet in the output queue is $p_x$ (`type=75`, $\text{len}(p_x) = 10{,}510$).
+
 4. The gameserver evaluates the guard $\mathcal{G}_{\text{hs}}(p_x)$:
 
-   $$
-   \text{len}(p_x) = 10{,}510 > 60 = S_{\text{accept}} \implies \mathcal{G}_{\text{hs}}(p_x) = \text{False}
-   $$
+$$
+\text{len}(p_x) = 10510 > 60 = S_{\text{accept}} \implies \mathcal{G}_{\text{hs}}(p_x) = \text{False}
+$$
 
 5. Under legacy engine error handling, the false guard triggers the size policy rejection branch:
 
-   $$
-   \mathcal{A}_{\text{abort}} = \left\{ \text{close}(sid), \, \text{SendRST}() \right\}
-   $$
+$$
+\mathcal{A}_{\text{abort}} = \left\{ \text{close}(sid), \, \text{SendRST}() \right\}
+$$
 
 6. The gateway receives the abrupt session closure and executes:
 
-   $$
-   \mathcal{A}_{\text{evict}} = \bigcup_{i=1}^k \left\{ \text{EvictPlayer}(u_i), \, \text{ClearInWorldState}(u_i) \right\}
-   $$
+$$
+\mathcal{A}_{\text{evict}} = \bigcup_{i=1}^k \left\{ \text{EvictPlayer}(u_i), \, \text{ClearInWorldState}(u_i) \right\}
+$$
 
 7. The cycle repeats ad infinitum because $p_x$ remains at the head of the gateway's unacknowledged retransmission queue. $\blacksquare$
 
@@ -213,26 +218,26 @@ where:
 - $B_{\text{sock}}$ is the kernel socket buffer capacity (`SO_SNDBUF`);
 - $\lambda_{\text{in}}(t)$ is the aggregate packet arrival rate from $N$ connected clients:
 
-  $$
-  \lambda_{\text{in}}(t) = \sum_{i=1}^N r_i(t) \cdot \overline{S}_i
-  $$
+$$
+\lambda_{\text{in}}(t) = \sum_{i=1}^N r_i(t) \cdot \overline{S}_i
+$$
 
-  with $r_i(t)$ being the RPC invocation rate of player $i$ and $\overline{S}_i$ the serialized payload size;
+with $r_i(t)$ being the RPC invocation rate of player $i$ and $\overline{S}_i$ the serialized payload size;
 - $\mu_{\text{drain}}(t)$ is the effective socket draining rate:
 
-  $$
-  \mu_{\text{drain}}(t) = \frac{\text{MSS}}{\text{RTT} + t_{\text{proc}}} \cdot \mathbb{I}_{(\text{Window} > 0)} \cdot (1 - \delta_{\text{Nagle}})
-  $$
+$$
+\mu_{\text{drain}}(t) = \frac{\text{MSS}}{\text{RTT} + t_{\text{proc}}} \cdot \mathbb{I}_{(\text{Window} > 0)} \cdot (1 - \delta_{\text{Nagle}})
+$$
 
-  where $\delta_{\text{Nagle}} \in [0, 1)$ represents the transmission penalty introduced by Nagle's algorithm waiting for pending ACKs on small packets.
+where $\delta_{\text{Nagle}} \in [0, 1)$ represents the transmission penalty introduced by Nagle's algorithm waiting for pending ACKs on small packets.
 
 ```mermaid
 graph LR
     subgraph Socket Queue Model
-        Arr["Incoming Traffic: λ_in(t) = Σ r_i(t) * S_i"] --> Buffer["Socket Buffer Q_send(t) [Cap: B_sock]"]
-        Buffer --> Drain["Drain Rate: μ_drain(t) = MSS / (RTT + t_proc)"]
+        Arr["Incoming Traffic: λ_in = Σ r_i * S_i"] --> Buffer["Socket Buffer Q_send [Cap: B_sock]"]
+        Buffer --> Drain["Drain Rate: μ_drain = MSS / (RTT + t_proc)"]
     end
-    Buffer -.->|When Q_send(t) >= B_sock| Overflow["Buffer Saturation (Stall)<br/>Trigger glinkd disconnect!"]
+    Buffer -.->|"Queue Exceeds Buffer Limit"| Overflow["Buffer Saturation (Stall)<br/>Trigger glinkd disconnect!"]
 ```
 
 #### Derivation of Buffer Stall Boundary ($\tau_{\text{stall}}$)
@@ -250,25 +255,25 @@ $$
 $$
 
 #### Proposition 1 (Buffer Sizing and Nagle Elimination)
-*Under default server parameters ($B_{\text{sock}} = 64\text{ KB} = 65{,}536\text{ bytes}$, $Q_0 = 32\text{ KB}$, $\mu = 40\text{ KB/s}$ due to Nagle delay $\delta_{\text{Nagle}} = 0.6$, and an auction query burst $\lambda_{\text{burst}} = 10 \times 10{,}510\text{ bytes} \approx 105{,}100\text{ bytes/s}$):*
+Consider the default server parameters with socket buffer $B_{\text{sock}} = 64\text{ KB} = 65{,}536\text{ bytes}$, initial backlog $Q_0 = 32\text{ KB}$, drain rate $\mu = 40\text{ KB/s}$ under Nagle delay ($\delta_{\text{Nagle}} = 0.6$), and burst rate $\lambda_{\text{burst}} = 105{,}100\text{ bytes/s}$:
 
 $$
-\tau_{\text{stall}}^{\text{default}} = \frac{65{,}536 - 32{,}768}{105{,}100 - 40{,}960} = \frac{32{,}768}{64{,}140} \approx 0.510\text{ s} \quad (510\text{ ms})
+\tau_{\text{stall}}^{\text{default}} = \frac{65536 - 32768}{105100 - 40960} = \frac{32768}{64140} \approx 0.510\text{ s} \quad (510\text{ ms})
 $$
 
-*Because the gateway's IPC timeout is configured at $500\text{ ms}$, the buffer saturates and trips the disconnect watchdog.*
+Because the gateway IPC timeout is configured at $500\text{ ms}$, the buffer saturates and trips the disconnect watchdog.
 
-*In contrast, when upgraded to $B_{\text{sock}} = 256\text{ KB} = 262{,}144\text{ bytes}$ with `TCP_NODELAY=1` ($\delta_{\text{Nagle}} = 0$, boosting $\mu \ge 180\text{ KB/s}$ over loopback):*
+In contrast, when upgraded to $B_{\text{sock}} = 256\text{ KB} = 262{,}144\text{ bytes}$ with `TCP_NODELAY=1` (draining rate $\mu \ge 180\text{ KB/s}$ over loopback):
 
 $$
-\lambda_{\text{burst}} - \mu = 105{,}100 - 184{,}320 \le 0
+\lambda_{\text{burst}} - \mu = 105100 - 184320 \le 0
 $$
 
 $$
 \frac{dQ_{\text{send}}(t)}{dt} \le 0 \implies \tau_{\text{stall}} \to \infty
 $$
 
-*The send queue remains in steady-state draining, mathematically precluding buffer starvation.*
+The send queue remains in steady-state draining, mathematically precluding buffer starvation.
 
 ---
 
@@ -340,55 +345,56 @@ $$
 \mathcal{S}_t = w_1 \cdot \tilde{\Delta}_{\text{RST}}(t) + w_2 \cdot \tilde{Z}_t(\text{RPC}) + w_3 \cdot \mathbb{I}_{\text{policy}}(t) + w_4 \cdot \big(1 - \tilde{H}_t\big)
 $$
 
-where:
-1. **Normalized TCP RST Differential ($\tilde{\Delta}_{\text{RST}}$):**
+The four constituent sub-scores are defined as follows:
 
-   $$
-   \Delta_{\text{RST}}(t) = \text{RST}_{\text{out}}(t) - \text{RST}_{\text{out}}(t - \Delta t)
-   $$
+**1. Normalized TCP RST Differential ($\tilde{\Delta}_{\text{RST}}$):**
 
-   $$
-   \tilde{\Delta}_{\text{RST}}(t) = \min\left(1.0, \; \frac{\Delta_{\text{RST}}(t)}{\theta_{\text{RST}}}\right), \quad \theta_{\text{RST}} = 100\text{ packets/s}
-   $$
+$$
+\Delta_{\text{RST}}(t) = \text{RST}_{\text{out}}(t) - \text{RST}_{\text{out}}(t - \Delta t)
+$$
 
-2. **Sliding-Window EWMA Behavioral RPC Score ($\tilde{Z}_t$):**  
-   For each active role $u \in \text{Players}$, incoming RPC events are weighted by operational hazard weight $\omega(k)$ (e.g., movement $= 1$, combat $= 2$, auction $= 15$, mail item $= 12$):
+$$
+\tilde{\Delta}_{\text{RST}}(t) = \min\left(1.0, \; \frac{\Delta_{\text{RST}}(t)}{\theta_{\text{RST}}}\right), \quad \theta_{\text{RST}} = 100\text{ packets/s}
+$$
 
-   $$
-   X_t(u) = \sum_{k \in \text{Events}(u, t)} \omega(k)
-   $$
+**2. Sliding-Window EWMA Behavioral RPC Score ($\tilde{Z}_t$):**  
+For each active role $u \in \text{Players}$, incoming RPC events are weighted by operational hazard weight $\omega(k)$ (e.g., movement $= 1$, combat $= 2$, auction $= 15$, mail item $= 12$):
 
-   The Exponentially Weighted Moving Average is updated recursively:
+$$
+X_t(u) = \sum_{k \in \text{Events}(u, t)} \omega(k)
+$$
 
-   $$
-   Z_t(u) = \alpha \cdot X_t(u) + (1 - \alpha) \cdot Z_{t-1}(u), \quad \alpha = 0.25
-   $$
+The Exponentially Weighted Moving Average is updated recursively:
 
-   $$
-   \tilde{Z}_t = \max_{u} \min\left(1.0, \; \frac{Z_t(u)}{\theta_{\text{EWMA}}}\right), \quad \theta_{\text{EWMA}} = 50.0
-   $$
+$$
+Z_t(u) = \alpha \cdot X_t(u) + (1 - \alpha) \cdot Z_{t-1}(u), \quad \alpha = 0.25
+$$
 
-3. **Protocol Policy Invariance Indicator ($\mathbb{I}_{\text{policy}}$):**
+$$
+\tilde{Z}_t = \max_{u} \min\left(1.0, \; \frac{Z_t(u)}{\theta_{\text{EWMA}}}\right), \quad \theta_{\text{EWMA}} = 50.0
+$$
 
-   $$
-   \mathbb{I}_{\text{policy}}(t) = \begin{cases} 
-   1.0, & \text{if } \exists p : (s = s_{\text{handshake}} \land \text{len}(p) > 60) \lor (\text{abort-detected}) \\ 
-   0.0, & \text{otherwise} 
-   \end{cases}
-   $$
+**3. Protocol Policy Invariance Indicator ($\mathbb{I}_{\text{policy}}$):**
 
-4. **Normalized Shannon Packet Entropy ($\tilde{H}_t$):**  
-   Let $p(k)$ be the empirical probability distribution of opcode $k$ observed over window $W = 100$ packets:
+$$
+\mathbb{I}_{\text{policy}}(t) = \begin{cases} 
+1.0, & \text{if } \exists p : (s = s_{\text{handshake}} \land \text{len}(p) > 60) \lor (\text{abort-detected}) \\ 
+0.0, & \text{otherwise} 
+\end{cases}
+$$
 
-   $$
-   H_t = -\sum_{k=1}^K p(k) \log_2 p(k)
-   $$
+**4. Normalized Shannon Packet Entropy ($\tilde{H}_t$):**  
+Let $p(k)$ be the empirical probability distribution of opcode $k$ observed over window $W = 100$ packets:
 
-   $$
-   \tilde{H}_t = \frac{H_t}{\log_2 K}
-   $$
+$$
+H_t = -\sum_{k=1}^K p(k) \log_2 p(k)
+$$
 
-   Under exploit flooding, opcode entropy collapses toward zero ($\tilde{H}_t \to 0$).
+$$
+\tilde{H}_t = \frac{H_t}{\log_2 K}
+$$
+
+Under exploit flooding, opcode entropy collapses toward zero ($\tilde{H}_t \to 0$).
 
 #### Tuned Weight Coefficients
 
