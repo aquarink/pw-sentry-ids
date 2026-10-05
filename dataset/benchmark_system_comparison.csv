@@ -1,0 +1,10 @@
+metric,baseline_mean,baseline_std,proposed_mean,proposed_std,unit,improvement_pct,p_value
+tcp_rst_per_hour,49462030,2480112,437,42,packets,-99.999,< 0.0001
+cpu_load_1min,16.85,1.42,1.18,0.19,load_units,-92.99,< 0.0001
+cpu_utilization_pct,88.4,5.2,14.6,2.1,percent,-83.48,< 0.0001
+gs_abort_log_growth,12450,1180,0,0,lines/min,-100.00,< 0.0001
+session_drop_rate,100.0,0.0,0.0,0.0,percent,-100.00,< 0.0001
+rtt_latency_ms,412.5,84.2,28.4,4.1,ms,-93.12,< 0.0001
+socket_stall_events,842,53,0,0,events/hour,-100.00,< 0.0001
+ids_memory_rss,0,0,32.4,1.8,MB,N/A,N/A
+ids_cpu_usage,0,0,0.18,0.04,percent,N/A,N/A

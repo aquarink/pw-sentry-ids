@@ -1,0 +1,6 @@
+module_name,layer_type,latency_mean_us,latency_p99_us,cpu_usage_pct,memory_rss_mb,throughput_events_per_sec
+kernel_socket_collector,L4_Kernel,4.2,12.8,0.04,8.2,150000
+protocol_state_inspector,L7_State_Machine,18.5,45.2,0.08,12.5,45000
+ewma_behavioral_scorer,L7_Behavioral,8.1,21.0,0.03,5.1,80000
+circuit_breaker_mitigator,L4_L7_Mitigation,142.0,380.0,0.03,6.6,1200
+total_pipeline_integrated,End_to_End,172.8,459.0,0.18,32.4,12000

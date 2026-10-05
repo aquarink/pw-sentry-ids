@@ -1,0 +1,7 @@
+attack_scenario,total_samples,true_positives,false_positives,true_negatives,false_negatives,precision,recall,f1_score,roc_auc
+l4_rst_syn_flood,10000,9985,12,8988,15,0.9988,0.9985,0.9986,0.9991
+l7_state_size_desync,5000,5000,0,5000,0,1.0000,1.0000,1.0000,1.0000
+auction_rpc_burst,5000,4960,18,4982,40,0.9964,0.9920,0.9942,0.9958
+malformed_binary_opcode,5000,4995,4,4996,5,0.9992,0.9990,0.9991,0.9994
+benign_mass_pvp_traffic,20000,0,24,19976,0,0.0000,1.0000,N/A,0.9988
+macro_average,45000,24940,58,43942,60,0.9977,0.9974,0.9975,0.9986
