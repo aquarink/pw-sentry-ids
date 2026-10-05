@@ -1,0 +1,4 @@
+# Standard library only for base sentry
+# Optional dependencies for ML/Analytics extensions:
+numpy>=1.21.0
+scipy>=1.7.0
