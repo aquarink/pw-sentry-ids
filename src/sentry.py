@@ -116,6 +116,8 @@ class PWSentry:
         self.user_role_map = {}    # userid -> roleid
         self.role_user_map = {}    # roleid -> userid
         self.account_name_map = {} # username -> ip_str
+        self.pwadmin_failed_attempts = {} # ip -> count
+        self.pwadmin_last_conn_ip = {}    # id -> ip
         self.role_rpc_counter = {}
         self.lock = threading.Lock()
         self.running = False
@@ -149,6 +151,20 @@ class PWSentry:
             logs["gdelivery"] = deliv_logs[-1]
         elif os.path.exists(os.path.join(log_dir, "gdeliveryd.log")):
             logs["gdelivery"] = os.path.join(log_dir, "gdeliveryd.log")
+
+        # 5. PWAdmin Port 1500 logs
+        pw_work = "/pwadmin/pwadmin_work.log"
+        if os.path.exists(pw_work):
+            logs["pwadmin_work"] = pw_work
+
+        pw_log = "/pwadmin/pwadmin.log"
+        if os.path.exists(pw_log):
+            logs["pwadmin_log"] = pw_log
+
+        # 6. Economic & Role Database Transactions (formatlog)
+        formatlog = "/home/logservice/logs/world2.formatlog"
+        if os.path.exists(formatlog):
+            logs["formatlog"] = formatlog
 
         return logs
 
@@ -221,6 +237,108 @@ class PWSentry:
                 "Gateway (glinkd 1) dropped connection with gameserver 1.\n"
                 "Automated recovery active: Inspecting socket buffers and reconnecting."
             )
+
+        # E. Port 1500 (PWAdmin) Brute Force & Session Watcher
+        elif tag == "pwadmin_work":
+            # Track client connection: Client connected (id:6) from 110.138.33.145
+            match_conn = re.search(r"Client connected \(id:(\d+)\) from (\S+)", line_str)
+            if match_conn:
+                conn_id, client_ip = match_conn.group(1), match_conn.group(2)
+                with self.lock:
+                    self.pwadmin_last_conn_ip[conn_id] = client_ip
+
+            # Track wrong password attempt: Client disconnected with wrong pass (id:6) ip: 85.217.149.9
+            match_fail = re.search(r"Client disconnected with wrong pass \(id:(\d+)\) ip:\s*(\S+)", line_str)
+            if match_fail:
+                _, bad_ip = match_fail.group(1), match_fail.group(2)
+                with self.lock:
+                    count = self.pwadmin_failed_attempts.get(bad_ip, 0) + 1
+                    self.pwadmin_failed_attempts[bad_ip] = count
+                print(f"[!] PWAdmin Authentication Failure from {bad_ip} (Attempt {count})")
+                if count >= 2:
+                    self.mitigator.block_ip(bad_ip)
+                    self.notifier.send_text(
+                        f"🚨 *[PW-SENTRY: PORT 1500 BRUTE-FORCE DETECTED]*\n"
+                        f"• *Attacker IP:* `{bad_ip}`\n"
+                        f"• *Failed Attempts:* `{count}`\n"
+                        f"• *Action Taken:* IP otomatis di-DROP di firewall iptables."
+                    )
+                    if self.discord_notifier:
+                        self.discord_notifier.send_alert(
+                            "PORT 1500 BRUTE-FORCE BLOCKED",
+                            {
+                                "Threat": "PWAdmin Password Brute-Force",
+                                "Attacker IP": bad_ip,
+                                "Failed Attempts": str(count),
+                                "Action": "IP Dropped in iptables"
+                            },
+                            is_emergency=True
+                        )
+
+            # Track successful login: Password accepted (id:6)
+            match_ok = re.search(r"Password accepted \(id:(\d+)\)", line_str)
+            if match_ok:
+                conn_id = match_ok.group(1)
+                with self.lock:
+                    login_ip = self.pwadmin_last_conn_ip.get(conn_id, "Unknown")
+                print(f"[!] PWAdmin Login Accepted for id:{conn_id} from {login_ip}")
+                self.notifier.send_text(
+                    f"🛡️ *[PW-SENTRY AUDIT: PWADMIN SESSION OPENED]*\n"
+                    f"• *Port:* `1500` (Management Daemon)\n"
+                    f"• *Admin IP:* `{login_ip}`\n"
+                    f"• *Status:* Password Accepted / Session Active"
+                )
+                if self.discord_notifier:
+                    self.discord_notifier.send_alert(
+                        "PWADMIN SESSION ESTABLISHED",
+                        {
+                            "Event": "Admin Login",
+                            "Port": "1500",
+                            "Source IP": login_ip,
+                            "Status": "Authorized"
+                        }
+                    )
+
+        # F. Formatlog Anomaly: Illegal Asset / Gold / EXP Injection
+        elif tag == "formatlog" and "formatlog:putroledata:" in line_str:
+            # Pattern: formatlog:putroledata:sid=1898:roleid=5248:timestamp=10:level=55:exp=329488:money=10000000:overwite=1
+            match = re.search(r"roleid=(\d+):.*exp=(\d+):money=(\d+):overwite=(\d+)", line_str)
+            if match:
+                rid = int(match.group(1))
+                exp_val = int(match.group(2))
+                money_val = int(match.group(3))
+                overwrite_flag = int(match.group(4))
+
+                # Flag high-value manual injection (> 1M gold or > 1M EXP with overwrite=1)
+                if overwrite_flag == 1 and (money_val >= 1000000 or exp_val >= 1000000):
+                    print(f"[!] CRITICAL ANOMALY: Direct Role Asset Injection! RoleID: {rid}, Money: {money_val}, EXP: {exp_val}")
+                    self.notifier.send_text(
+                        f"🚨 *[PW-SENTRY ALERT: DETEKSI INJEKSI ASET / GOLD]* 🚨\n"
+                        f"• *Target RoleID:* `{rid}`\n"
+                        f"• *Injeksi Gold:* `{money_val:,} Coins`\n"
+                        f"• *Injeksi EXP:* `{exp_val:,} EXP`\n"
+                        f"• *Vektor:* `gamedbd::putroledata (Direct Overwrite via Port 1500)`\n"
+                        f"• *Status:* Perubahan data karakter bernilai tinggi terdeteksi!"
+                    )
+                    if self.discord_notifier:
+                        self.discord_notifier.send_alert(
+                            "ILLEGAL ASSET INJECTION DETECTED",
+                            {
+                                "Target RoleID": str(rid),
+                                "Injected Money": f"{money_val:,} Coins",
+                                "Injected EXP": f"{exp_val:,} EXP",
+                                "Vector": "Direct Overwrite (gamedbd / Port 1500)",
+                                "Severity": "CRITICAL"
+                            },
+                            is_emergency=True
+                        )
+
+        # G. PWAdmin High-Level Action Audit
+        elif tag == "pwadmin_log":
+            if "Give" in line_str and "gold" in line_str:
+                self.notifier.send_text(f"⚠️ *[PW-SENTRY AUDIT]*\n`{line_str}`")
+            elif "Shell:" in line_str:
+                self.notifier.send_text(f"⚠️ *[PW-SENTRY SHELL EXECUTION]*\n`{line_str}`")
 
     def follow_file(self, tag, filepath):
         if not os.path.exists(filepath):
