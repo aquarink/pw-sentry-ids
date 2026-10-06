@@ -192,29 +192,25 @@ class PWSentry:
         elif "Protocol state or size policy error" in line_str:
             # Pattern: sid=..., type=75, size=10510, acceptsize=60
             match = re.search(r"sid=(\d+),\s*type=(\d+),\s*size=(\d+),\s*acceptsize=(\d+)", line_str)
-            size = int(match.group(3)) if match else "Unknown"
-            pkt_type = int(match.group(2)) if match else 75
+            size = int(match.group(3)) if match else 0
+            pkt_type = int(match.group(2)) if match else 0
 
-            # Find active offender from most recent login
-            with self.lock:
-                suspect_uid = list(self.user_ip_map.keys())[-1] if self.user_ip_map else None
-                suspect_ip = self.user_ip_map.get(suspect_uid) if suspect_uid else None
-                suspect_rid = self.user_role_map.get(suspect_uid) if suspect_uid else None
-
-            print(f"[!] CRITICAL ANOMALY: Protocol Size Policy Error (Size: {size}, Type: {pkt_type})")
-            # Auto-mitigate: Ban account, block IP, send WA notification
-            self.mitigator.execute_quarantine(
-                anomaly_type="PROTOCOL_SIZE_POLICY_EXPLOIT",
-                userid=suspect_uid,
-                roleid=suspect_rid,
-                ip_str=suspect_ip,
-                details={
-                    "Packet Type": pkt_type,
-                    "Payload Size": f"{size} bytes (Max: 60)",
-                    "Violation": "Payload size exceeded handshake acceptance limit",
-                    "Impact": "Prevented Gateway-Gameserver Cascading Collapse"
-                }
-            )
+            # ONLY flag gameserver handshake exploit (type 75, oversized payload >= 1000 bytes)
+            # Low-level glink1 debug traces (type 71, 3, 83) are normal network/client artifacts.
+            if tag == "gs_err" and pkt_type == 75 and size >= 1000:
+                print(f"[!] CRITICAL ANOMALY: Gameserver Protocol Size Exploit (Size: {size}, Type: {pkt_type})")
+                self.mitigator.execute_quarantine(
+                    anomaly_type="PROTOCOL_SIZE_POLICY_EXPLOIT",
+                    userid=None,
+                    roleid=None,
+                    ip_str=None,
+                    details={
+                        "Packet Type": pkt_type,
+                        "Payload Size": f"{size} bytes (Max: 60)",
+                        "Violation": "Payload size exceeded handshake acceptance limit",
+                        "Impact": "Intercepted at gameserver boundary; gateway buffer safe"
+                    }
+                )
 
         # D. Anomaly: Gateway Session Drop All Players
         elif "disconnect from gameserver 1, drop all players" in line_str:

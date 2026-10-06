@@ -49,18 +49,9 @@ class ActiveMitigator:
                 if row:
                     username = row[0]
 
-            # 3. Scramble password
-            new_pass = self.generate_random_password()
-            if username:
-                md5_hash = hashlib.md5((username + new_pass).encode("utf-8")).digest()
-                cursor.execute(
-                    "UPDATE users SET passwd=%s, passwd2=%s WHERE ID=%s",
-                    (md5_hash, md5_hash, int(userid))
-                )
-
             conn.close()
             self.quarantined_users.add(userid)
-            return True, f"User {userid} ({username}) banned and password scrambled."
+            return True, f"User {userid} ({username}) banned in forbid table."
         except Exception as e:
             return False, f"DB Error: {e}"
 
